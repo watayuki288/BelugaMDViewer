@@ -1,0 +1,232 @@
+@import 'tailwindcss';
+@import 'katex/dist/katex.min.css';
+@import './rich-markdown-editor.css';
+@import './markdown-preview.css';
+@import './scrollbar-sleek.css';
+
+@font-face {
+  font-family: 'Geist';
+  src: url('./fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@custom-variant dark (&:is(.dark *));
+@custom-variant can-hover (@media (hover: hover));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-editor-surface: var(--editor-surface);
+  --color-callout-note: var(--callout-note);
+  --color-callout-important: var(--callout-important);
+  --color-status-success: var(--status-success);
+  --color-status-warning: var(--status-warning);
+  --color-warning: var(--status-warning);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+}
+
+:root {
+  --app-font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Yu Gothic UI', sans-serif;
+  --font-sans: var(--app-font-family);
+  --font-mono:
+    'SF Mono', SFMono-Regular, ui-monospace, 'Cascadia Code', Menlo, Consolas, 'Liberation Mono',
+    monospace;
+  --markdown-code-font-family: var(--font-mono);
+  --radius: 0.625rem;
+  --markdown-reading-measure-em: 60;
+  --editor-font-zoom-level: 0;
+
+  --background: #ffffff;
+  --editor-surface: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --primary: #171717;
+  --primary-foreground: #fafafa;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #171717;
+  --muted: #f5f5f5;
+  --muted-foreground: #696969;
+  --accent: #f0f0f0;
+  --accent-foreground: #171717;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #a1a1a1;
+  --sidebar: #fafafa;
+  --sidebar-foreground: #0a0a0a;
+  --sidebar-border: #e5e5e5;
+
+  --destructive: #e40014;
+  --destructive-foreground: #ffffff;
+  --status-success: #147638;
+  --status-warning: #ca8a04;
+  --callout-note: #0969da;
+  --callout-important: #8250df;
+  --text-link: #0969da;
+
+  --chart-1: #93c5fd;
+  --chart-2: #3b82f6;
+  --chart-3: #2563eb;
+  --chart-4: #1d4ed8;
+  --chart-5: #1e40af;
+
+  --annotation-highlight: #f59e0b;
+  --markdown-search-match: #facc15;
+  --markdown-search-match-active: #fb923c;
+}
+
+.dark {
+  --background: #0a0a0a;
+  --editor-surface: #1e1e1e;
+  --foreground: #f0f0f0;
+  --card: #171717;
+  --card-foreground: #f0f0f0;
+  --popover: #171717;
+  --popover-foreground: #f0f0f0;
+  --primary: #e5e5e5;
+  --primary-foreground: #171717;
+  --secondary: #262626;
+  --secondary-foreground: #f0f0f0;
+  --muted: #262626;
+  --muted-foreground: #acacac;
+  --accent: #323232;
+  --accent-foreground: #f0f0f0;
+  --border: rgb(255 255 255 / 0.09);
+  --input: rgb(255 255 255 / 0.15);
+  --ring: #737373;
+  --sidebar: #141414;
+  --sidebar-foreground: #f0f0f0;
+  --sidebar-border: rgb(255 255 255 / 0.08);
+
+  --destructive: #ff6568;
+  --destructive-foreground: #450a0a;
+  --status-success: #86efac;
+  --status-warning: #eab308;
+  --callout-note: #4493f8;
+  --callout-important: #ab7df8;
+  --text-link: #4493f8;
+
+  --chart-1: #93c5fd;
+  --chart-2: #3b82f6;
+  --chart-3: #2563eb;
+  --chart-4: #1d4ed8;
+  --chart-5: #1e40af;
+
+  --annotation-highlight: #fbbf24;
+  --markdown-search-match: #facc15;
+  --markdown-search-match-active: #fb923c;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--editor-surface);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Frontmatter card in Preview & Rich Edit */
+.orca-frontmatter-card {
+  margin: 0 0 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 45%, var(--editor-surface));
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.orca-frontmatter-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-weight: 600;
+  user-select: none;
+}
+
+.orca-frontmatter-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--foreground);
+  background: transparent;
+}
+
+/* Table hover action controls */
+.orca-table-controls-bar {
+  position: absolute;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
+  font-size: 11px;
+}
+
+.orca-table-controls-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.orca-table-controls-bar button:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.orca-table-controls-bar button.danger:hover {
+  background: color-mix(in srgb, var(--destructive) 14%, transparent);
+  color: var(--destructive);
+}

@@ -1,0 +1,44 @@
+appId: com.belugamdviewer.app
+productName: BelugaMDViewer
+copyright: Copyright © 2026 BelugaMDViewer Contributors (MIT)
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**/*
+  - package.json
+  - LICENSE
+  - LICENSE.orca.txt
+  - THIRD_PARTY_NOTICES.md
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: build/icon.ico
+fileAssociations:
+  - ext: md
+    name: Markdown Document
+    description: Markdown Document
+    role: Editor
+  - ext: markdown
+    name: Markdown Document
+    description: Markdown Document
+    role: Editor
+  - ext: mdx
+    name: MDX Document
+    description: MDX Document
+    role: Editor
+nsis:
+  artifactName: ${productName}-${version}-Setup.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: BelugaMDViewer
+portable:
+  artifactName: ${productName}-${version}-Portable.${ext}
