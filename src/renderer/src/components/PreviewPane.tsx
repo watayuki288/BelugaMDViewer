@@ -19,6 +19,14 @@ function hasMermaidCodeClass(value: unknown): boolean {
   return typeof value === 'string' && /language-mermaid/.test(value)
 }
 
+function safeDecodeFragment(raw: string): string {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
 function PreviewImage({
   src,
   alt,
@@ -36,7 +44,8 @@ export function PreviewPane({
   fontZoomLevel,
   showToc,
   onCloseToc,
-  searchOpenToken,
+  openSearchToken,
+  onConsumeSearchOpen,
   onOpenRelativeMarkdown,
   onExpandMermaid
 }: {
@@ -46,7 +55,8 @@ export function PreviewPane({
   fontZoomLevel: number
   showToc: boolean
   onCloseToc: () => void
-  searchOpenToken: number
+  openSearchToken: number | null
+  onConsumeSearchOpen: (token: number) => void
   onOpenRelativeMarkdown: (resolvedPath: string) => void
   onExpandMermaid: (diagram: RenderedMermaidDiagram) => void
 }): React.JSX.Element {
@@ -65,25 +75,19 @@ export function PreviewPane({
   const tocItems = useMemo(() => buildMarkdownTableOfContents(bodyContent), [bodyContent])
 
   useEffect(() => {
-    if (searchOpenToken > 0) {
+    if (openSearchToken !== null) {
       setIsSearchOpen(true)
+      onConsumeSearchOpen(openSearchToken)
       requestAnimationFrame(() => {
         searchInputRef.current?.focus()
         searchInputRef.current?.select()
       })
     }
-  }, [searchOpenToken])
+  }, [openSearchToken, onConsumeSearchOpen])
 
-  // CSS Custom Highlight API search (same zero-DOM-mutation approach as Orca!)
+  // Compute match ranges in Preview DOM
   useEffect(() => {
-    const cssHighlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
-    const clearHighlights = (): void => {
-      cssHighlights?.delete('markdown-preview-search-match')
-      cssHighlights?.delete('markdown-preview-search-active-match')
-    }
-
     if (!isSearchOpen || !searchQuery.trim() || !bodyRef.current) {
-      clearHighlights()
       setMatchRanges([])
       setActiveMatchIndex(0)
       return
@@ -108,27 +112,25 @@ export function PreviewPane({
 
     setMatchRanges(ranges)
     setActiveMatchIndex(0)
-
-    const HighlightCtor = (window as unknown as { Highlight?: new (...r: Range[]) => unknown })
-      .Highlight
-    if (cssHighlights && HighlightCtor) {
-      if (ranges.length > 0) {
-        cssHighlights.set('markdown-preview-search-match', new HighlightCtor(...ranges))
-        cssHighlights.set('markdown-preview-search-active-match', new HighlightCtor(ranges[0]))
-      } else {
-        clearHighlights()
-      }
-    }
-
-    return clearHighlights
   }, [isSearchOpen, searchQuery, bodyContent])
 
+  // Paint global CSS Highlights for the visible Preview pane
   useEffect(() => {
     const cssHighlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
     const HighlightCtor = (window as unknown as { Highlight?: new (...r: Range[]) => unknown })
       .Highlight
-    const active = matchRanges[activeMatchIndex]
-    if (cssHighlights && HighlightCtor && active) {
+    if (!cssHighlights || !HighlightCtor) return
+
+    if (!isSearchOpen || matchRanges.length === 0) {
+      cssHighlights.delete('markdown-preview-search-match')
+      cssHighlights.delete('markdown-preview-search-active-match')
+      return
+    }
+
+    const clamped = Math.min(activeMatchIndex, matchRanges.length - 1)
+    const active = matchRanges[clamped]
+    cssHighlights.set('markdown-preview-search-match', new HighlightCtor(...matchRanges))
+    if (active) {
       cssHighlights.set('markdown-preview-search-active-match', new HighlightCtor(active))
       const el =
         active.startContainer instanceof Element
@@ -136,7 +138,7 @@ export function PreviewPane({
           : active.startContainer.parentElement
       el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
     }
-  }, [activeMatchIndex, matchRanges])
+  }, [isSearchOpen, matchRanges, activeMatchIndex])
 
   const scrollToAnchor = useCallback((id: string) => {
     const container = scrollerRef.current
@@ -178,7 +180,7 @@ export function PreviewPane({
               if (!href) return
               e.preventDefault()
               if (href.startsWith('#')) {
-                scrollToAnchor(decodeURIComponent(href.slice(1)))
+                scrollToAnchor(safeDecodeFragment(href.slice(1)))
                 return
               }
               if (/^(https?:|mailto:)/i.test(href)) {

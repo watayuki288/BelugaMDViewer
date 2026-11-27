@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Eye,
   FilePlus2,
@@ -21,6 +21,13 @@ import { RichMarkdownPane } from './components/rich-markdown/RichMarkdownPane'
 import { FolderSidebar } from './components/FolderSidebar'
 import { MermaidModal } from './lib/mermaid/MermaidModal'
 import type { RenderedMermaidDiagram } from './lib/mermaid/MermaidBlock'
+import { evictLocalImageCacheForBasePath } from './lib/local-image-cache'
+import { ThemeDarkContext } from './lib/theme-context'
+
+function isSameFilePath(a?: string, b?: string): boolean {
+  if (!a || !b) return false
+  return a.toLowerCase() === b.toLowerCase()
+}
 
 interface DocumentTab {
   id: string
@@ -117,7 +124,12 @@ export function App(): React.JSX.Element {
   })
   const [systemDark, setSystemDark] = useState<boolean>(() => getSystemDark())
   const [fontZoomLevel, setFontZoomLevel] = useState<number>(0)
-  const [searchOpenToken, setSearchOpenToken] = useState<number>(0)
+  const [searchOpenRequest, setSearchOpenRequest] = useState<{
+    tabId: string
+    viewMode: ViewMode
+    token: number
+  } | null>(null)
+  const searchTokenCounterRef = useRef(0)
   const [historyAction, setHistoryAction] = useState<{
     type: 'undo' | 'redo'
     token: number
@@ -145,7 +157,7 @@ export function App(): React.JSX.Element {
     return () => mq.removeEventListener('change', onChange)
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     localStorage.setItem('belugamdviewer-theme', themePref)
     document.documentElement.classList.toggle('dark', isDark)
     document.documentElement.classList.toggle('light', !isDark)
@@ -211,6 +223,7 @@ export function App(): React.JSX.Element {
     })
     const offOpen = window.api.onOpenFilesFromOs((files) => openLoadedFiles(files))
     const offChanged = window.api.onExternalFileChanged(({ filePath, content }) => {
+      evictLocalImageCacheForBasePath(filePath)
       setTabs((prev) =>
         prev.map((tab) => {
           if (tab.filePath !== filePath) return tab
@@ -302,7 +315,19 @@ export function App(): React.JSX.Element {
 
       const saved = await window.api.saveFileAsDialog(activeTab.name, activeTab.content)
       if (!saved) return
-      void window.api.watchFile(saved.filePath)
+      const previousPath = activeTab.filePath
+      if (!isSameFilePath(previousPath, saved.filePath)) {
+        if (previousPath) {
+          void window.api.unwatchFile(previousPath)
+          const stillUsed = tabs.some(
+            (t) => t.id !== activeTab.id && isSameFilePath(t.filePath, previousPath)
+          )
+          if (!stillUsed) {
+            evictLocalImageCacheForBasePath(previousPath)
+          }
+        }
+        void window.api.watchFile(saved.filePath)
+      }
       setTabs((prev) =>
         prev.map((t) =>
           t.id === activeTab.id
@@ -318,7 +343,7 @@ export function App(): React.JSX.Element {
       )
       showToast(`Saved ${saved.name}`)
     },
-    [activeTab, showToast]
+    [activeTab, tabs, showToast]
   )
 
   const handleCloseTab = useCallback(
@@ -331,6 +356,12 @@ export function App(): React.JSX.Element {
       }
       if (target.filePath) {
         void window.api.unwatchFile(target.filePath)
+        const stillUsed = tabs.some(
+          (t) => t.id !== tabId && isSameFilePath(t.filePath, target.filePath)
+        )
+        if (!stillUsed) {
+          evictLocalImageCacheForBasePath(target.filePath)
+        }
       }
       setTabs((prev) => {
         const idx = prev.findIndex((t) => t.id === tabId)
@@ -362,6 +393,15 @@ export function App(): React.JSX.Element {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, content: nextMarkdown } : t)))
   }, [])
 
+  const triggerFindForActivePane = useCallback((tabId: string, mode: ViewMode) => {
+    searchTokenCounterRef.current += 1
+    setSearchOpenRequest({ tabId, viewMode: mode, token: searchTokenCounterRef.current })
+  }, [])
+
+  const consumeSearchOpenRequest = useCallback((token: number) => {
+    setSearchOpenRequest((current) => (current?.token === token ? null : current))
+  }, [])
+
   // Menu & keyboard shortcut wiring
   const actionsRef = useRef({
     handleNewTab,
@@ -369,7 +409,8 @@ export function App(): React.JSX.Element {
     handleOpenFolder,
     handleSave,
     handleCloseTab,
-    activeTabId
+    activeTabId,
+    viewMode
   })
   actionsRef.current = {
     handleNewTab,
@@ -377,7 +418,8 @@ export function App(): React.JSX.Element {
     handleOpenFolder,
     handleSave,
     handleCloseTab,
-    activeTabId
+    activeTabId,
+    viewMode
   }
 
   useEffect(() => {
@@ -409,7 +451,7 @@ export function App(): React.JSX.Element {
           setHistoryAction((prev) => ({ type: 'redo', token: (prev?.token ?? 0) + 1 }))
           break
         case 'find':
-          setSearchOpenToken((n) => n + 1)
+          triggerFindForActivePane(a.activeTabId, a.viewMode)
           break
         case 'toggle-mode':
           setViewMode((m) => (m === 'rich' ? 'preview' : 'rich'))
@@ -452,8 +494,9 @@ export function App(): React.JSX.Element {
   }
 
   return (
-    <div
-      className="flex h-full w-full flex-col bg-editor-surface text-foreground select-none"
+    <ThemeDarkContext.Provider value={isDark}>
+      <div
+        className="flex h-full w-full flex-col bg-editor-surface text-foreground select-none"
       onDragOver={(e) => {
         e.preventDefault()
         setIsDragOver(true)
@@ -603,7 +646,9 @@ export function App(): React.JSX.Element {
 
           <button
             type="button"
-            onClick={() => setSearchOpenToken((n) => n + 1)}
+            onClick={() => {
+              if (activeTab) triggerFindForActivePane(activeTab.id, viewMode)
+            }}
             title="Find in Document (Ctrl+F)"
             className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer"
           >
@@ -697,7 +742,14 @@ export function App(): React.JSX.Element {
                 fontZoomLevel={fontZoomLevel}
                 showToc={showToc}
                 onCloseToc={() => setShowToc(false)}
-                searchOpenToken={searchOpenToken}
+                openSearchToken={
+                  searchOpenRequest &&
+                  searchOpenRequest.tabId === activeTab.id &&
+                  searchOpenRequest.viewMode === 'preview'
+                    ? searchOpenRequest.token
+                    : null
+                }
+                onConsumeSearchOpen={consumeSearchOpenRequest}
                 onOpenRelativeMarkdown={(p) => void handleOpenPath(p)}
                 onExpandMermaid={setExpandedMermaid}
               />
@@ -714,7 +766,14 @@ export function App(): React.JSX.Element {
                 fontZoomLevel={fontZoomLevel}
                 showToc={showToc}
                 onCloseToc={() => setShowToc(false)}
-                searchOpenToken={searchOpenToken}
+                openSearchToken={
+                  searchOpenRequest &&
+                  searchOpenRequest.tabId === tab.id &&
+                  searchOpenRequest.viewMode === 'rich'
+                    ? searchOpenRequest.token
+                    : null
+                }
+                onConsumeSearchOpen={consumeSearchOpenRequest}
                 historyAction={historyAction}
                 onChange={(nextMarkdown) => handleTabContentChange(tab.id, nextMarkdown)}
                 onExpandMermaid={setExpandedMermaid}
@@ -751,6 +810,7 @@ export function App(): React.JSX.Element {
       </footer>
 
       <MermaidModal diagram={expandedMermaid} onClose={() => setExpandedMermaid(null)} />
-    </div>
+      </div>
+    </ThemeDarkContext.Provider>
   )
 }

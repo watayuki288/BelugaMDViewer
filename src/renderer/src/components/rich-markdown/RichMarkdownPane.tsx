@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { ChevronDown, ChevronUp, X } from 'lucide-react'
+import MarkdownHeadingSlugger from 'github-slugger'
 import {
   extractFrontMatter,
   markdownFrontMatterInner,
   prependFrontMatter
 } from '@/lib/markdown-frontmatter'
-import { buildMarkdownTableOfContents } from '@/lib/markdown-table-of-contents'
+import {
+  buildMarkdownTableOfContents,
+  normalizeMarkdownTocTitle
+} from '@/lib/markdown-table-of-contents'
 import type { RenderedMermaidDiagram } from '@/lib/mermaid/MermaidBlock'
 import { MarkdownTableOfContentsPanel } from '../MarkdownTableOfContentsPanel'
 import { createRichMarkdownExtensions } from './rich-markdown-extensions'
@@ -27,6 +31,24 @@ interface LinkBubbleState {
   initialEditing: boolean
 }
 
+function extractHeadingTextForToc(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.nodeValue ?? ''
+  }
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node as Element
+    if (el.tagName === 'IMG') {
+      return el.getAttribute('alt') ?? ''
+    }
+    let out = ''
+    for (const child of Array.from(el.childNodes)) {
+      out += extractHeadingTextForToc(child)
+    }
+    return out
+  }
+  return ''
+}
+
 export function RichMarkdownPane({
   tabId,
   hidden = false,
@@ -36,7 +58,8 @@ export function RichMarkdownPane({
   fontZoomLevel,
   showToc,
   onCloseToc,
-  searchOpenToken,
+  openSearchToken,
+  onConsumeSearchOpen,
   historyAction,
   onChange,
   onExpandMermaid,
@@ -50,7 +73,8 @@ export function RichMarkdownPane({
   fontZoomLevel: number
   showToc: boolean
   onCloseToc: () => void
-  searchOpenToken: number
+  openSearchToken: number | null
+  onConsumeSearchOpen: (token: number) => void
   historyAction?: { type: 'undo' | 'redo'; token: number } | null
   onChange: (nextMarkdown: string) => void
   onExpandMermaid: (diagram: RenderedMermaidDiagram) => void
@@ -331,50 +355,40 @@ export function RichMarkdownPane({
 
   const tocItems = useMemo(() => buildMarkdownTableOfContents(bodyMarkdown), [bodyMarkdown])
 
-  const handleNavigateToc = useCallback(
-    (id: string) => {
-      const container = scrollContainerRef.current
-      if (!container) return
-      const headings = container.querySelectorAll<HTMLElement>(
-        '.rich-markdown-editor h1, .rich-markdown-editor h2, .rich-markdown-editor h3, .rich-markdown-editor h4, .rich-markdown-editor h5'
-      )
-      // Match heading text to ToC slug
-      const flat: Array<{ id: string; title: string }> = []
-      const flatten = (items: typeof tocItems): void => {
-        for (const item of items) {
-          flat.push({ id: item.id, title: item.title })
-          flatten(item.children)
-        }
+  const handleNavigateToc = useCallback((id: string) => {
+    const container = scrollContainerRef.current
+    if (!container) return
+    const headings = container.querySelectorAll<HTMLElement>(
+      '.rich-markdown-editor h1, .rich-markdown-editor h2, .rich-markdown-editor h3, .rich-markdown-editor h4, .rich-markdown-editor h5'
+    )
+    const slugger = new MarkdownHeadingSlugger()
+    for (const heading of Array.from(headings)) {
+      const title = normalizeMarkdownTocTitle(extractHeadingTextForToc(heading))
+      if (!title) continue
+      if (slugger.slug(title) === id) {
+        heading.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        return
       }
-      flatten(tocItems)
-      const targetIndex = flat.findIndex((x) => x.id === id)
-      const targetEl = targetIndex >= 0 ? headings[targetIndex] : null
-      targetEl?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    },
-    [tocItems]
-  )
+    }
+  }, [])
+
+  const [scrollMatchSeq, setScrollMatchSeq] = useState(0)
 
   useEffect(() => {
-    if (!hidden && searchOpenToken > 0) {
+    if (!hidden && openSearchToken !== null) {
       setIsSearchOpen(true)
+      onConsumeSearchOpen(openSearchToken)
       requestAnimationFrame(() => {
         searchInputRef.current?.focus()
         searchInputRef.current?.select()
       })
     }
-  }, [searchOpenToken, hidden])
+  }, [openSearchToken, hidden, onConsumeSearchOpen])
 
-  // CSS Custom Highlight search in Rich Editor
+  // Compute match ranges in Rich Editor without touching global CSS Highlights when hidden
   useEffect(() => {
-    const cssHighlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
-    const clearHighlights = (): void => {
-      cssHighlights?.delete('markdown-preview-search-match')
-      cssHighlights?.delete('markdown-preview-search-active-match')
-    }
-
     const editorEl = scrollContainerRef.current?.querySelector('.rich-markdown-editor')
     if (!isSearchOpen || !searchQuery.trim() || !editorEl) {
-      clearHighlights()
       setMatchRanges([])
       setActiveMatchIndex(0)
       return
@@ -398,37 +412,50 @@ export function RichMarkdownPane({
     }
 
     setMatchRanges(ranges)
-    setActiveMatchIndex(0)
-
-    const HighlightCtor = (window as unknown as { Highlight?: new (...r: Range[]) => unknown })
-      .Highlight
-    if (cssHighlights && HighlightCtor && ranges.length > 0) {
-      cssHighlights.set('markdown-preview-search-match', new HighlightCtor(...ranges))
-      cssHighlights.set('markdown-preview-search-active-match', new HighlightCtor(ranges[0]))
-    } else {
-      clearHighlights()
+    setActiveMatchIndex((prev) => (ranges.length === 0 ? 0 : Math.min(prev, ranges.length - 1)))
+    if (ranges.length > 0) {
+      setScrollMatchSeq((s) => s + 1)
     }
-    return clearHighlights
   }, [isSearchOpen, searchQuery, bodyMarkdown])
 
+  // Re-apply CSS Highlights whenever this pane is visible, preserving activeMatchIndex across view/tab switches
   useEffect(() => {
+    if (hidden) return
     const cssHighlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights
     const HighlightCtor = (window as unknown as { Highlight?: new (...r: Range[]) => unknown })
       .Highlight
-    const active = matchRanges[activeMatchIndex]
-    if (cssHighlights && HighlightCtor && active) {
-      cssHighlights.set('markdown-preview-search-active-match', new HighlightCtor(active))
-      const el =
-        active.startContainer instanceof Element
-          ? active.startContainer
-          : active.startContainer.parentElement
-      el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (!cssHighlights || !HighlightCtor) return
+
+    if (!isSearchOpen || matchRanges.length === 0) {
+      cssHighlights.delete('markdown-preview-search-match')
+      cssHighlights.delete('markdown-preview-search-active-match')
+      return
     }
-  }, [activeMatchIndex, matchRanges])
+
+    const clamped = Math.min(activeMatchIndex, matchRanges.length - 1)
+    const active = matchRanges[clamped]
+    cssHighlights.set('markdown-preview-search-match', new HighlightCtor(...matchRanges))
+    if (active) {
+      cssHighlights.set('markdown-preview-search-active-match', new HighlightCtor(active))
+    }
+  }, [hidden, isSearchOpen, matchRanges, activeMatchIndex])
+
+  // Scroll active match into view only on explicit query/navigation changes (not when restoring visibility)
+  useEffect(() => {
+    if (hidden || scrollMatchSeq === 0) return
+    const active = matchRanges[Math.min(activeMatchIndex, matchRanges.length - 1)]
+    if (!active) return
+    const el =
+      active.startContainer instanceof Element
+        ? active.startContainer
+        : active.startContainer.parentElement
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [scrollMatchSeq, activeMatchIndex, matchRanges, hidden])
 
   const moveMatch = (dir: 1 | -1): void => {
     if (matchRanges.length === 0) return
     setActiveMatchIndex((i) => (i + dir + matchRanges.length) % matchRanges.length)
+    setScrollMatchSeq((s) => s + 1)
   }
 
   return (

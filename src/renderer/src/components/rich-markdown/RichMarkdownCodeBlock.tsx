@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { NodeViewContent, NodeViewWrapper, type NodeViewProps } from '@tiptap/react'
 import { Check, Copy } from 'lucide-react'
 import { MermaidBlock, type RenderedMermaidDiagram } from '@/lib/mermaid/MermaidBlock'
+import { useThemeDark } from '@/lib/theme-context'
 
 const CODE_LANGUAGES: ReadonlyArray<{ value: string; label: string }> = [
   { value: '', label: 'Plain text' },
@@ -42,7 +43,7 @@ export function RichMarkdownCodeBlock({
   const language = (node.attrs.language as string) || ''
   const [copied, setCopied] = useState(false)
   const timerRef = useRef<number | null>(null)
-  const isDark = document.documentElement.classList.contains('dark')
+  const isDark = useThemeDark()
   const isMermaid = language === 'mermaid'
 
   const expandMermaid = (

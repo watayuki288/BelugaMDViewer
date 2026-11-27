@@ -30,7 +30,10 @@ const IMAGE_EXTENSIONS = new Set([
 
 let mainWindow: BrowserWindow | null = null
 const pendingOpenPaths: string[] = []
-const fileWatchers = new Map<string, { watcher: FSWatcher; timer?: NodeJS.Timeout }>()
+const fileWatchers = new Map<
+  string,
+  { watcher: FSWatcher; refCount: number; timer?: NodeJS.Timeout }
+>()
 const recentOwnSaves = new Map<string, number>()
 
 // Authorization registries (normalized real paths) to prevent arbitrary filesystem access from renderer IPC.
@@ -281,10 +284,14 @@ async function readFolderTree(dirPath: string, depth = 0): Promise<FileTreeNode[
   }
 }
 
-function unwatchFilePath(filePath: string): void {
+function unwatchFilePath(filePath: string, force = false): void {
   const key = normalizeKey(filePath)
   const entry = fileWatchers.get(key)
   if (!entry) return
+  if (!force && entry.refCount > 1) {
+    entry.refCount -= 1
+    return
+  }
   if (entry.timer) clearTimeout(entry.timer)
   try {
     entry.watcher.close()
@@ -296,7 +303,11 @@ function unwatchFilePath(filePath: string): void {
 
 function watchFilePath(realFilePath: string): void {
   const key = normalizeKey(realFilePath)
-  if (fileWatchers.has(key)) return
+  const existing = fileWatchers.get(key)
+  if (existing) {
+    existing.refCount += 1
+    return
+  }
   try {
     const watcher = watch(realFilePath, { persistent: false }, () => {
       const entry = fileWatchers.get(key)
@@ -314,8 +325,8 @@ function watchFilePath(realFilePath: string): void {
         }
       }, 200)
     })
-    watcher.on('error', () => unwatchFilePath(realFilePath))
-    fileWatchers.set(key, { watcher })
+    watcher.on('error', () => unwatchFilePath(realFilePath, true))
+    fileWatchers.set(key, { watcher, refCount: 1 })
   } catch {
     // ignore watch failure
   }
@@ -493,7 +504,7 @@ if (!gotSingleInstanceLock) {
 
   app.on('window-all-closed', () => {
     for (const key of [...fileWatchers.keys()]) {
-      unwatchFilePath(key)
+      unwatchFilePath(key, true)
     }
     if (process.platform !== 'darwin') {
       app.quit()
