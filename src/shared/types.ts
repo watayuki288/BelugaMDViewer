@@ -19,6 +19,7 @@ export interface OrcaMdApi {
   openFolderDialog: () => Promise<{ rootPath: string; tree: FileTreeNode[] } | null>
   readFolderTree: (rootPath: string) => Promise<FileTreeNode[]>
   readFile: (filePath: string) => Promise<OpenFileResult | null>
+  openDroppedFile: (file: File) => Promise<OpenFileResult | null>
   saveFile: (filePath: string, content: string) => Promise<{ ok: boolean; error?: string }>
   saveFileAsDialog: (
     defaultName: string,

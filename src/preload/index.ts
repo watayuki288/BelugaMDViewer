@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { OpenFileResult, OrcaMdApi } from '@shared/types'
 
 const api: OrcaMdApi = {
@@ -6,6 +6,16 @@ const api: OrcaMdApi = {
   openFolderDialog: () => ipcRenderer.invoke('file:open-folder-dialog'),
   readFolderTree: (rootPath) => ipcRenderer.invoke('file:read-folder-tree', rootPath),
   readFile: (filePath) => ipcRenderer.invoke('file:read', filePath),
+  openDroppedFile: (file) => {
+    try {
+      // Only genuine OS-dropped File objects have a real backing path via webUtils.
+      const realPath = webUtils.getPathForFile(file)
+      if (!realPath) return Promise.resolve(null)
+      return ipcRenderer.invoke('file:open-dropped', realPath)
+    } catch {
+      return Promise.resolve(null)
+    }
+  },
   saveFile: (filePath, content) => ipcRenderer.invoke('file:save', filePath, content),
   saveFileAsDialog: (defaultName, content) =>
     ipcRenderer.invoke('file:save-as-dialog', defaultName, content),

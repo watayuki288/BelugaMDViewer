@@ -6,26 +6,193 @@ import {
   ipcMain,
   Menu,
   shell,
+  type IpcMainInvokeEvent,
   type MenuItemConstructorOptions
 } from 'electron'
 import { promises as fs, watch, type FSWatcher } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import mime from 'mime-types'
 import type { FileTreeNode, OpenFileResult } from '@shared/types'
 
 const MARKDOWN_EXTENSIONS = new Set(['.md', '.markdown', '.mdx', '.mdown', '.mkd', '.txt'])
-const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico', '.avif'])
+const IMAGE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.bmp',
+  '.ico',
+  '.avif'
+])
 
 let mainWindow: BrowserWindow | null = null
 const pendingOpenPaths: string[] = []
 const fileWatchers = new Map<string, { watcher: FSWatcher; timer?: NodeJS.Timeout }>()
 const recentOwnSaves = new Map<string, number>()
 
+// Authorization registries (normalized real paths) to prevent arbitrary filesystem access from renderer IPC.
+const authorizedFiles = new Set<string>()
+const authorizedRoots = new Set<string>()
+const authorizedImageFiles = new Set<string>()
+
+function normalizeKey(p: string): string {
+  const resolved = path.resolve(p)
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function hasUnsafePathInput(input: string): boolean {
+  if (!input || input.includes('\0')) return true
+  // Reject Windows UNC shares (`\\server\share`, `//server/share`) and Win32 device namespaces (`\\?\`, `\\.\`).
+  if (/^(\\\\|\/\/)/.test(input)) return true
+  return false
+}
+
+function safeDecodeURIComponent(value: string): string | null {
+  try {
+    const decoded = decodeURIComponent(value)
+    if (decoded.includes('\0')) return null
+    return decoded
+  } catch {
+    return null
+  }
+}
+
+function parseSafeLocalFileUrl(rawUrl: string): string | null {
+  if (hasUnsafePathInput(rawUrl)) return null
+  try {
+    const parsed = new URL(rawUrl)
+    if (parsed.protocol !== 'file:') return null
+    // Reject non-local hosts to prevent Windows UNC paths / outbound SMB & Net-NTLMv2 auth.
+    if (parsed.hostname !== '' && parsed.hostname.toLowerCase() !== 'localhost') {
+      return null
+    }
+    const decodedPath = safeDecodeURIComponent(parsed.pathname)
+    if (decodedPath === null) return null
+    const fsPath = fileURLToPath(parsed)
+    if (hasUnsafePathInput(fsPath)) return null
+    return path.resolve(fsPath)
+  } catch {
+    return null
+  }
+}
+
+function parseSafeExternalUrl(rawUrl: string): string | null {
+  if (!rawUrl || rawUrl.includes('\0')) return null
+  try {
+    const parsed = new URL(rawUrl)
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'mailto:') {
+      return parsed.href
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+async function openSafeExternalUrl(rawUrl: string): Promise<boolean> {
+  const safe = parseSafeExternalUrl(rawUrl)
+  if (!safe) return false
+  await shell.openExternal(safe)
+  return true
+}
+
+function isPathWithinDirectory(candidatePath: string, directoryPath: string): boolean {
+  const rel = path.relative(normalizeKey(directoryPath), normalizeKey(candidatePath))
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+async function resolveRealExistingFile(filePath: string): Promise<string | null> {
+  if (hasUnsafePathInput(filePath)) return null
+  try {
+    const resolved = path.resolve(filePath)
+    if (hasUnsafePathInput(resolved)) return null
+    const real = await fs.realpath(resolved)
+    if (hasUnsafePathInput(real)) return null
+    const stat = await fs.stat(real)
+    return stat.isFile() ? real : null
+  } catch {
+    return null
+  }
+}
+
+async function resolveRealExistingDir(dirPath: string): Promise<string | null> {
+  if (hasUnsafePathInput(dirPath)) return null
+  try {
+    const resolved = path.resolve(dirPath)
+    if (hasUnsafePathInput(resolved)) return null
+    const real = await fs.realpath(resolved)
+    if (hasUnsafePathInput(real)) return null
+    const stat = await fs.stat(real)
+    return stat.isDirectory() ? real : null
+  } catch {
+    return null
+  }
+}
+
+function isAuthorizedFilePath(realFilePath: string): boolean {
+  const key = normalizeKey(realFilePath)
+  if (authorizedFiles.has(key)) return true
+  const ext = path.extname(realFilePath).toLowerCase()
+  if (!MARKDOWN_EXTENSIONS.has(ext)) return false
+  for (const root of authorizedRoots) {
+    if (isPathWithinDirectory(realFilePath, root)) {
+      return true
+    }
+  }
+  return false
+}
+
+function authorizeFile(realFilePath: string): void {
+  authorizedFiles.add(normalizeKey(realFilePath))
+}
+
+function authorizeRoot(realDirPath: string): void {
+  authorizedRoots.add(normalizeKey(realDirPath))
+}
+
+function getTrustedRendererUrl(): string {
+  if (!app.isPackaged && process.env['ELECTRON_RENDERER_URL']) {
+    return process.env['ELECTRON_RENDERER_URL']
+  }
+  return pathToFileURL(path.join(__dirname, '../renderer/index.html')).href
+}
+
+function isTrustedAppUrl(targetUrl: string): boolean {
+  try {
+    const trusted = new URL(getTrustedRendererUrl())
+    const candidate = new URL(targetUrl)
+    if (trusted.protocol === 'file:') {
+      return (
+        candidate.protocol === 'file:' &&
+        normalizeKey(fileURLToPath(candidate)) === normalizeKey(fileURLToPath(trusted))
+      )
+    }
+    return candidate.origin === trusted.origin
+  } catch {
+    return false
+  }
+}
+
+function assertTrustedSender(event: IpcMainInvokeEvent): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error('Untrusted IPC sender: no active window')
+  }
+  if (event.sender !== mainWindow.webContents) {
+    throw new Error('Untrusted IPC sender: unknown webContents')
+  }
+  const frame = event.senderFrame
+  if (!frame || frame !== mainWindow.webContents.mainFrame || !isTrustedAppUrl(frame.url)) {
+    throw new Error('Untrusted IPC sender: invalid frame or origin')
+  }
+}
+
 function extractMarkdownArgs(argv: string[]): string[] {
   const results: string[] = []
   for (const arg of argv.slice(app.isPackaged ? 1 : 2)) {
-    if (!arg || arg.startsWith('-')) continue
+    if (!arg || arg.startsWith('-') || hasUnsafePathInput(arg)) continue
     const ext = path.extname(arg).toLowerCase()
     if (MARKDOWN_EXTENSIONS.has(ext)) {
       results.push(path.resolve(arg))
@@ -34,16 +201,34 @@ function extractMarkdownArgs(argv: string[]): string[] {
   return results
 }
 
-async function readMarkdownFile(filePath: string): Promise<OpenFileResult | null> {
+async function readAndAuthorizeMarkdownFile(filePath: string): Promise<OpenFileResult | null> {
+  const real = await resolveRealExistingFile(filePath)
+  if (!real) return null
+  const ext = path.extname(real).toLowerCase()
+  if (!MARKDOWN_EXTENSIONS.has(ext)) return null
   try {
-    const resolved = path.resolve(filePath)
-    const stat = await fs.stat(resolved)
-    if (!stat.isFile()) return null
-    const content = await fs.readFile(resolved, 'utf8')
+    const content = await fs.readFile(real, 'utf8')
+    authorizeFile(real)
     return {
-      filePath: resolved,
+      filePath: real,
       content,
-      name: path.basename(resolved)
+      name: path.basename(real)
+    }
+  } catch {
+    return null
+  }
+}
+
+async function readAuthorizedMarkdownFile(filePath: string): Promise<OpenFileResult | null> {
+  const real = await resolveRealExistingFile(filePath)
+  if (!real || !isAuthorizedFilePath(real)) return null
+  try {
+    const content = await fs.readFile(real, 'utf8')
+    authorizeFile(real)
+    return {
+      filePath: real,
+      content,
+      name: path.basename(real)
     }
   } catch {
     return null
@@ -75,7 +260,10 @@ async function readFolderTree(dirPath: string, depth = 0): Promise<FileTreeNode[
             children
           })
         }
-      } else if (entry.isFile() && MARKDOWN_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+      } else if (
+        entry.isFile() &&
+        MARKDOWN_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+      ) {
         nodes.push({
           name: entry.name,
           path: fullPath,
@@ -94,7 +282,7 @@ async function readFolderTree(dirPath: string, depth = 0): Promise<FileTreeNode[
 }
 
 function unwatchFilePath(filePath: string): void {
-  const key = path.resolve(filePath)
+  const key = normalizeKey(filePath)
   const entry = fileWatchers.get(key)
   if (!entry) return
   if (entry.timer) clearTimeout(entry.timer)
@@ -106,18 +294,18 @@ function unwatchFilePath(filePath: string): void {
   fileWatchers.delete(key)
 }
 
-function watchFilePath(filePath: string): void {
-  const key = path.resolve(filePath)
+function watchFilePath(realFilePath: string): void {
+  const key = normalizeKey(realFilePath)
   if (fileWatchers.has(key)) return
   try {
-    const watcher = watch(key, { persistent: false }, () => {
+    const watcher = watch(realFilePath, { persistent: false }, () => {
       const entry = fileWatchers.get(key)
       if (!entry) return
       if (entry.timer) clearTimeout(entry.timer)
       entry.timer = setTimeout(async () => {
         const lastSave = recentOwnSaves.get(key) ?? 0
         if (Date.now() - lastSave < 800) return
-        const file = await readMarkdownFile(key)
+        const file = await readAuthorizedMarkdownFile(realFilePath)
         if (file && mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('file:external-changed', {
             filePath: file.filePath,
@@ -126,7 +314,7 @@ function watchFilePath(filePath: string): void {
         }
       }, 200)
     })
-    watcher.on('error', () => unwatchFilePath(key))
+    watcher.on('error', () => unwatchFilePath(realFilePath))
     fileWatchers.set(key, { watcher })
   } catch {
     // ignore watch failure
@@ -238,15 +426,30 @@ function createWindow(): void {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false
     }
   })
 
+  // Block popups; open safe http(s)/mailto links in the OS default browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) {
-      void shell.openExternal(url)
-    }
+    void openSafeExternalUrl(url)
     return { action: 'deny' }
+  })
+
+  // Lock down top-level navigations and redirects so untrusted content (e.g. SVG links) cannot navigate to external origins with preload APIs attached.
+  mainWindow.webContents.on('will-navigate', (event, navUrl) => {
+    if (!isTrustedAppUrl(navUrl)) {
+      event.preventDefault()
+      void openSafeExternalUrl(navUrl)
+    }
+  })
+
+  mainWindow.webContents.on('will-redirect', (event, navUrl) => {
+    if (!isTrustedAppUrl(navUrl)) {
+      event.preventDefault()
+    }
   })
 
   if (!app.isPackaged && process.env['ELECTRON_RENDERER_URL']) {
@@ -272,7 +475,7 @@ if (!gotSingleInstanceLock) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
       if (filePaths.length > 0) {
-        const files = (await Promise.all(filePaths.map(readMarkdownFile))).filter(
+        const files = (await Promise.all(filePaths.map(readAndAuthorizeMarkdownFile))).filter(
           (f): f is OpenFileResult => f !== null
         )
         if (files.length > 0) {
@@ -299,13 +502,15 @@ if (!gotSingleInstanceLock) {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle('file:get-initial', async () => {
+  ipcMain.handle('file:get-initial', async (event) => {
+    assertTrustedSender(event)
     const paths = pendingOpenPaths.splice(0, pendingOpenPaths.length)
-    const files = await Promise.all(paths.map(readMarkdownFile))
+    const files = await Promise.all(paths.map(readAndAuthorizeMarkdownFile))
     return files.filter((f): f is OpenFileResult => f !== null)
   })
 
-  ipcMain.handle('file:open-dialog', async () => {
+  ipcMain.handle('file:open-dialog', async (event) => {
+    assertTrustedSender(event)
     const win = mainWindow ?? BrowserWindow.getFocusedWindow()
     const opts: Electron.OpenDialogOptions = {
       title: 'Open Markdown File',
@@ -317,11 +522,12 @@ function registerIpcHandlers(): void {
     }
     const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
     if (result.canceled || result.filePaths.length === 0) return []
-    const files = await Promise.all(result.filePaths.map(readMarkdownFile))
+    const files = await Promise.all(result.filePaths.map(readAndAuthorizeMarkdownFile))
     return files.filter((f): f is OpenFileResult => f !== null)
   })
 
-  ipcMain.handle('file:open-folder-dialog', async () => {
+  ipcMain.handle('file:open-folder-dialog', async (event) => {
+    assertTrustedSender(event)
     const win = mainWindow ?? BrowserWindow.getFocusedWindow()
     const opts: Electron.OpenDialogOptions = {
       title: 'Open Folder',
@@ -329,31 +535,56 @@ function registerIpcHandlers(): void {
     }
     const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
     if (result.canceled || result.filePaths.length === 0) return null
-    const rootPath = result.filePaths[0]
-    const tree = await readFolderTree(rootPath)
-    return { rootPath, tree }
+    const realRoot = await resolveRealExistingDir(result.filePaths[0])
+    if (!realRoot) return null
+    authorizeRoot(realRoot)
+    const tree = await readFolderTree(realRoot)
+    return { rootPath: realRoot, tree }
   })
 
-  ipcMain.handle('file:read-folder-tree', async (_event, rootPath: string) => {
-    return readFolderTree(rootPath)
+  ipcMain.handle('file:read-folder-tree', async (event, rootPath: string) => {
+    assertTrustedSender(event)
+    const realRoot = await resolveRealExistingDir(rootPath)
+    if (!realRoot || !authorizedRoots.has(normalizeKey(realRoot))) {
+      return []
+    }
+    return readFolderTree(realRoot)
   })
 
-  ipcMain.handle('file:read', async (_event, filePath: string) => {
-    return readMarkdownFile(filePath)
+  ipcMain.handle('file:read', async (event, filePath: string) => {
+    assertTrustedSender(event)
+    return readAuthorizedMarkdownFile(filePath)
   })
 
-  ipcMain.handle('file:save', async (_event, filePath: string, content: string) => {
+  ipcMain.handle('file:open-dropped', async (event, filePath: string) => {
+    assertTrustedSender(event)
+    return readAndAuthorizeMarkdownFile(filePath)
+  })
+
+  ipcMain.handle('file:save', async (event, filePath: string, content: string) => {
+    assertTrustedSender(event)
+    if (typeof content !== 'string') {
+      return { ok: false, error: 'Invalid content' }
+    }
+    const real = await resolveRealExistingFile(filePath)
+    if (!real || !authorizedFiles.has(normalizeKey(real))) {
+      return { ok: false, error: 'File is not authorized for direct save' }
+    }
+    if (!MARKDOWN_EXTENSIONS.has(path.extname(real).toLowerCase())) {
+      return { ok: false, error: 'Unsupported file extension' }
+    }
     try {
-      const resolved = path.resolve(filePath)
-      recentOwnSaves.set(resolved, Date.now())
-      await fs.writeFile(resolved, content, 'utf8')
+      recentOwnSaves.set(normalizeKey(real), Date.now())
+      await fs.writeFile(real, content, 'utf8')
       return { ok: true }
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })
 
-  ipcMain.handle('file:save-as-dialog', async (_event, defaultName: string, content: string) => {
+  ipcMain.handle('file:save-as-dialog', async (event, defaultName: string, content: string) => {
+    assertTrustedSender(event)
+    if (typeof content !== 'string') return null
     const win = mainWindow ?? BrowserWindow.getFocusedWindow()
     const opts: Electron.SaveDialogOptions = {
       title: 'Save Markdown File',
@@ -364,18 +595,22 @@ function registerIpcHandlers(): void {
       ]
     }
     const result = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts)
-    if (result.canceled || !result.filePath) return null
+    if (result.canceled || !result.filePath || hasUnsafePathInput(result.filePath)) return null
     const resolved = path.resolve(result.filePath)
-    recentOwnSaves.set(resolved, Date.now())
+    recentOwnSaves.set(normalizeKey(resolved), Date.now())
     await fs.writeFile(resolved, content, 'utf8')
-    return { filePath: resolved, name: path.basename(resolved) }
+    const real = (await resolveRealExistingFile(resolved)) ?? resolved
+    authorizeFile(real)
+    return { filePath: real, name: path.basename(real) }
   })
 
-  ipcMain.handle('file:pick-image-dialog', async (_event, baseFilePath?: string) => {
+  ipcMain.handle('file:pick-image-dialog', async (event, baseFilePath?: string) => {
+    assertTrustedSender(event)
     const win = mainWindow ?? BrowserWindow.getFocusedWindow()
     const opts: Electron.OpenDialogOptions = {
       title: 'Insert Image',
-      defaultPath: baseFilePath ? path.dirname(baseFilePath) : undefined,
+      defaultPath:
+        baseFilePath && !hasUnsafePathInput(baseFilePath) ? path.dirname(baseFilePath) : undefined,
       properties: ['openFile'],
       filters: [
         { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif'] }
@@ -383,39 +618,66 @@ function registerIpcHandlers(): void {
     }
     const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
     if (result.canceled || result.filePaths.length === 0) return null
-    const chosen = result.filePaths[0]
-    if (baseFilePath) {
-      const rel = path.relative(path.dirname(baseFilePath), chosen).replace(/\\/g, '/')
+    const realChosen = await resolveRealExistingFile(result.filePaths[0])
+    if (!realChosen) return null
+    authorizedImageFiles.add(normalizeKey(realChosen))
+    if (baseFilePath && !hasUnsafePathInput(baseFilePath)) {
+      const rel = path.relative(path.dirname(baseFilePath), realChosen).replace(/\\/g, '/')
       if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
         return `./${rel}`
       }
       return rel
     }
-    return chosen
+    return realChosen
   })
 
-  ipcMain.handle('file:read-local-image', async (_event, src: string, baseFilePath?: string) => {
+  ipcMain.handle('file:read-local-image', async (event, src: string, baseFilePath?: string) => {
+    assertTrustedSender(event)
     try {
-      if (!src) return null
-      if (/^(https?:|data:|blob:)/i.test(src)) return src
-      let resolved: string
-      if (src.startsWith('file://')) {
-        resolved = fileURLToPath(src)
+      if (!src || hasUnsafePathInput(src)) return null
+      if (/^(https?:|data:image\/|blob:)/i.test(src)) return src
+
+      const realBase = baseFilePath ? await resolveRealExistingFile(baseFilePath) : null
+      if (realBase && !isAuthorizedFilePath(realBase)) return null
+      const baseDir = realBase ? path.dirname(realBase) : null
+
+      let candidate: string | null = null
+      if (/^file:/i.test(src)) {
+        candidate = parseSafeLocalFileUrl(src)
       } else {
-        const cleanSrc = decodeURIComponent(src.split(/[?#]/)[0])
-        if (path.isAbsolute(cleanSrc)) {
-          resolved = cleanSrc
-        } else if (baseFilePath) {
-          resolved = path.resolve(path.dirname(baseFilePath), cleanSrc)
-        } else {
-          return null
+        const decoded = safeDecodeURIComponent(src.split(/[?#]/)[0])
+        if (!decoded || hasUnsafePathInput(decoded)) return null
+        if (path.isAbsolute(decoded)) {
+          candidate = path.resolve(decoded)
+        } else if (baseDir) {
+          candidate = path.resolve(baseDir, decoded)
         }
       }
-      const ext = path.extname(resolved).toLowerCase()
+      if (!candidate || hasUnsafePathInput(candidate)) return null
+
+      const realTarget = await resolveRealExistingFile(candidate)
+      if (!realTarget) return null
+
+      const ext = path.extname(realTarget).toLowerCase()
       if (!IMAGE_EXTENSIONS.has(ext)) return null
-      const stat = await fs.stat(resolved)
+
+      // Enforce boundary: image must be explicitly picked by user, or inside the document's directory / an authorized folder root.
+      const isExplicitlyPicked = authorizedImageFiles.has(normalizeKey(realTarget))
+      const isInDocDir = baseDir ? isPathWithinDirectory(realTarget, baseDir) : false
+      let isInAuthorizedRoot = false
+      for (const root of authorizedRoots) {
+        if (isPathWithinDirectory(realTarget, root)) {
+          isInAuthorizedRoot = true
+          break
+        }
+      }
+      if (!isExplicitlyPicked && !isInDocDir && !isInAuthorizedRoot) {
+        return null
+      }
+
+      const stat = await fs.stat(realTarget)
       if (!stat.isFile() || stat.size > 30 * 1024 * 1024) return null
-      const buf = await fs.readFile(resolved)
+      const buf = await fs.readFile(realTarget)
       const mimeType = mime.lookup(ext) || 'application/octet-stream'
       return `data:${mimeType};base64,${buf.toString('base64')}`
     } catch {
@@ -423,37 +685,71 @@ function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('file:resolve-relative', async (_event, href: string, baseFilePath?: string) => {
+  ipcMain.handle('file:resolve-relative', async (event, href: string, baseFilePath?: string) => {
+    assertTrustedSender(event)
     try {
-      if (!href || !baseFilePath) return null
-      const cleanHref = decodeURIComponent(href.split(/[?#]/)[0])
-      const resolved = path.isAbsolute(cleanHref)
-        ? cleanHref
-        : path.resolve(path.dirname(baseFilePath), cleanHref)
-      const stat = await fs.stat(resolved)
-      return stat.isFile() ? resolved : null
+      if (!href || !baseFilePath || hasUnsafePathInput(href) || hasUnsafePathInput(baseFilePath)) {
+        return null
+      }
+      const realBase = await resolveRealExistingFile(baseFilePath)
+      if (!realBase || !isAuthorizedFilePath(realBase)) return null
+      const baseDir = path.dirname(realBase)
+
+      let candidate: string | null = null
+      if (/^file:/i.test(href)) {
+        candidate = parseSafeLocalFileUrl(href)
+      } else {
+        const decoded = safeDecodeURIComponent(href.split(/[?#]/)[0])
+        if (!decoded || hasUnsafePathInput(decoded)) return null
+        candidate = path.isAbsolute(decoded)
+          ? path.resolve(decoded)
+          : path.resolve(baseDir, decoded)
+      }
+      if (!candidate || hasUnsafePathInput(candidate)) return null
+
+      const realTarget = await resolveRealExistingFile(candidate)
+      if (!realTarget) return null
+      if (!MARKDOWN_EXTENSIONS.has(path.extname(realTarget).toLowerCase())) return null
+
+      const isInDocDir = isPathWithinDirectory(realTarget, baseDir)
+      let isInAuthorizedRoot = false
+      for (const root of authorizedRoots) {
+        if (isPathWithinDirectory(realTarget, root)) {
+          isInAuthorizedRoot = true
+          break
+        }
+      }
+      if (!isInDocDir && !isInAuthorizedRoot) return null
+
+      authorizeFile(realTarget)
+      return realTarget
     } catch {
       return null
     }
   })
 
-  ipcMain.handle('file:watch', (_event, filePath: string) => {
-    watchFilePath(filePath)
+  ipcMain.handle('file:watch', async (event, filePath: string) => {
+    assertTrustedSender(event)
+    const real = await resolveRealExistingFile(filePath)
+    if (!real || !isAuthorizedFilePath(real)) return
+    watchFilePath(real)
   })
 
-  ipcMain.handle('file:unwatch', (_event, filePath: string) => {
+  ipcMain.handle('file:unwatch', (event, filePath: string) => {
+    assertTrustedSender(event)
+    if (hasUnsafePathInput(filePath)) return
     unwatchFilePath(filePath)
   })
 
-  ipcMain.handle('app:open-external', async (_event, url: string) => {
-    if (/^(https?:|mailto:)/i.test(url)) {
-      await shell.openExternal(url)
-    } else if (url.startsWith('file://')) {
-      await shell.openPath(fileURLToPath(url))
-    }
+  ipcMain.handle('app:open-external', async (event, url: string) => {
+    assertTrustedSender(event)
+    // Strictly allow only http(s) and mailto; never invoke shell.openPath on document-supplied links.
+    await openSafeExternalUrl(url)
   })
 
-  ipcMain.handle('app:write-clipboard', (_event, text: string) => {
+  ipcMain.handle('app:write-clipboard', (event, text: string) => {
+    assertTrustedSender(event)
+    if (typeof text !== 'string') return
     clipboard.writeText(text)
   })
 }

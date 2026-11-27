@@ -443,9 +443,10 @@ export function App(): React.JSX.Element {
     setIsDragOver(false)
     const files = Array.from(e.dataTransfer.files)
     for (const file of files) {
-      const pathStr = (file as File & { path?: string }).path
-      if (pathStr && /\.(md|markdown|mdx|mdown|mkd|txt)$/i.test(pathStr)) {
-        void handleOpenPath(pathStr)
+      if (/\.(md|markdown|mdx|mdown|mkd|txt)$/i.test(file.name)) {
+        void window.api.openDroppedFile(file).then((loaded) => {
+          if (loaded) openLoadedFiles([loaded])
+        })
       }
     }
   }

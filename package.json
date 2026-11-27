@@ -1,6 +1,6 @@
 {
   "name": "beluga-md-viewer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Standalone Windows Markdown viewer & rich WYSIWYG editor",
   "author": "BelugaMDViewer Contributors",
   "license": "MIT",
@@ -41,12 +41,12 @@
     "@vitejs/plugin-react": "^4.4.1",
     "clsx": "^2.1.1",
     "dompurify": "^3.2.6",
-    "electron": "^35.2.0",
-    "electron-builder": "^26.0.12",
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^3.1.0",
     "github-slugger": "2.0.0",
     "highlight.js": "11.11.1",
-    "katex": "^0.16.22",
+    "katex": "0.18.10",
     "lowlight": "^3.3.0",
     "lucide-react": "^0.511.0",
     "marked": "^17.0.1",
@@ -72,6 +72,10 @@
     "vite": "^6.3.5"
   },
   "pnpm": {
+    "overrides": {
+      "katex": "0.18.10",
+      "minimatch@>=7.0.0 <11.0.1": "^11.0.1"
+    },
     "patchedDependencies": {
       "@tiptap/markdown@3.31.3": "patches/@tiptap__markdown@3.31.3.patch",
       "mermaid@11.17.2": "patches/mermaid@11.17.2.patch"

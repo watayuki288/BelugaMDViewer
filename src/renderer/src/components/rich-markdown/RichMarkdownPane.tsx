@@ -322,7 +322,7 @@ export function RichMarkdownPane({
         })
         return
       }
-      void window.api.openExternal(href)
+      // Block non-http(s)/mailto links (including file:// executables or UNC shares).
     },
     [filePath, onOpenRelativeMarkdown]
   )
