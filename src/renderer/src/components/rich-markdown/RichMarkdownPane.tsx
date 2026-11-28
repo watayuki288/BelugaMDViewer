@@ -540,8 +540,24 @@ export function RichMarkdownPane({
             ref={scrollContainerRef}
             className="relative h-full overflow-auto scrollbar-editor [overflow-anchor:none]"
             onMouseDown={(e) => {
-              if (e.target === e.currentTarget) {
-                editor?.commands.focus('end')
+              if (e.button !== 0 || e.target !== e.currentTarget) return
+              const container = e.currentTarget
+              const rect = container.getBoundingClientRect()
+              // Ignore clicks on native vertical or horizontal scrollbars.
+              if (
+                e.clientX >= rect.left + container.clientWidth ||
+                e.clientY >= rect.top + container.clientHeight
+              ) {
+                return
+              }
+              const editorEl = container.querySelector('.rich-markdown-editor')
+              if (!editor) return
+              if (editor.isEmpty) {
+                e.preventDefault()
+                editor.commands.focus('start')
+              } else if (editorEl && e.clientY > editorEl.getBoundingClientRect().bottom) {
+                e.preventDefault()
+                editor.commands.focus('end')
               }
             }}
           >
